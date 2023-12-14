@@ -16,7 +16,7 @@ if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir);
 }
 
-const storage = multer.memoryStorage(); // Use memory storage to get the file buffer in memory
+const storage = multer.memoryStorage(); // Use memory storage to get the buffer in memory
 const upload = multer({ storage: storage });
 
 app.use(express.static(path.join(__dirname, 'frontend', 'build')));
@@ -26,7 +26,7 @@ app.post('/upload', upload.array('images'), async (req, res) => {
     const processedImages = [];
 
     for (const file of req.files) {
-      const processedImageBuffer = await cropImage(file.buffer, file.originalname, 1200, 1200);
+      const processedImageBuffer = await cropImage(file.buffer, file.originalname, Array.isArray(req.body.company) ? req.body.company[0] : req.body.company, req.body.crop);
       const base64Image = processedImageBuffer.toString('base64');
       processedImages.push({ name: file.originalname, data: base64Image });
     }
@@ -120,44 +120,51 @@ function getBorders(set, size) {
   return [start, end];
 }
 
-async function cropImage(buffer, filename, targetHeight, targetWidth) {
+async function cropImage(buffer, filename, company, crop) {
   try {
-    console.log('__dirname:', __dirname);
-    console.log('filename:', filename);
+    console.log(company)
+    const [targetHeight, targetWidth] = (company === "spark") ? [1492, 1080] : [1220, 1220];
+    const [canvasHeight, canvasWidth] = (company === "spark") ? [1620, 1080] : [1620, 1620];
 
-    const pixelData = await getAllPixels(buffer);
-    const whiteRows = new Set();
-    const whiteCols = new Set();
-
-    const treshold = getAverage(pixelData.pixels.flat().flat()) * 1.03;
-
-    for (let x = 0; x < pixelData.width; x++)
-      if (isWhiteRow(x, pixelData.height, pixelData.pixels, treshold + 4)) whiteCols.add(x);
-    for (let y = 0; y < pixelData.height; y++)
-      if (isWhiteColumn(y, pixelData.width, pixelData.pixels, treshold + 4)) whiteRows.add(y);
-
-    const [colStart, colEnd] = getBorders(whiteCols, whiteCols.size);
-    const [rowStart, rowEnd] = getBorders(whiteRows, whiteRows.size);
-
+    const jpgBuffer = await sharp(buffer)
+      .flatten({ background: { r: 255, g: 255, b: 255, alpha: 1 } }) // Set transparent parts to white
+      .jpeg({ quality: 100, force: true }) // Convert to JPG format
+      .toBuffer();
+      
+      if(crop === 'no-crop') {
+        return await sharp(jpgBuffer).toFormat("webp")
+        .toBuffer();
+      }
+      const pixelData = await getAllPixels(jpgBuffer);
+      const whiteRows = new Set();
+      const whiteCols = new Set();
+      
+      const treshold = Math.min(getAverage(pixelData.pixels.flat().flat()) * 1.03, 250);
+      console.log(treshold);
+      for (let x = 0; x < pixelData.width; x++)
+      if (isWhiteRow(x, pixelData.height, pixelData.pixels, treshold)) whiteCols.add(x);
+      for (let y = 0; y < pixelData.height; y++)
+      if (isWhiteColumn(y, pixelData.width, pixelData.pixels, treshold)) whiteRows.add(y);
+      let [colStart, colEnd] = getBorders(whiteCols, whiteCols.size);
+      let [rowStart, rowEnd] = getBorders(whiteRows, whiteRows.size);
+      if(colStart === undefined) colStart = 0;
+      if(rowStart === undefined) rowStart = 0;
+      if(colEnd === undefined) colEnd = pixelData.width;
+      if(rowEnd === undefined) rowEnd = pixelData.height;
     console.log('Crop Coordinates:', colStart, colEnd, rowStart, rowEnd);
 
     // Ensure that the crop coordinates are valid before using sharp
     if (colStart !== undefined && colEnd !== undefined && rowStart !== undefined && rowEnd !== undefined) {
       // Use sharp directly with the buffer and obtain the processed image as a buffer
-      const croppedImage = await sharp(buffer)
+      const croppedImage = await sharp(jpgBuffer)
         .extract({ left: colStart, top: rowStart, width: colEnd - colStart, height: rowEnd - rowStart })
         .resize(targetWidth, targetHeight, { fit: 'contain', position: 'centre', background: 'white' })
         .toBuffer();
 
-        const fileExtension = 'webp';
-
-        // Create the output path with the original filename and WebP extension
-        const outputPath = path.join(__dirname, 'uploads', `${path.parse(filename).name}.${fileExtension}`);
-
         const resizedImage = await sharp({
           create: {
-            width: 1620,
-            height: 1620,
+            width: canvasWidth,
+            height: canvasHeight,
             channels: 3,
             background: 'white',
           },
@@ -165,18 +172,16 @@ async function cropImage(buffer, filename, targetHeight, targetWidth) {
         .composite([
           {
             input: croppedImage,
-            left: Math.floor((1620 - targetWidth) / 2),
-            top: Math.floor((1620 - targetHeight) / 2),
+            left: (company !== "spark") ?
+              Math.floor((canvasWidth - targetWidth) / 2) :
+              0,
+            top: (company !== "spark") ? 
+              Math.floor((canvasHeight - targetHeight) / 2) :
+              97,
           },
         ])
         .toFormat("webp")
         .toBuffer();
-
-        console.log(filename)
-
-        // Now you can save the processedImageBuffer or do further processing as needed
-        fs.writeFileSync(outputPath, resizedImage);
-
 
       console.log('Image processed successfully');
 
